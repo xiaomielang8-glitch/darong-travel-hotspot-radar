@@ -1,21 +1,21 @@
 {
   "ai": {
     "provider": "doubao",
-    "model": "ep-20250715141929-kvxj4",
+    "model": "doubao-seed-2-0-mini-260215",
     "api_key_env": "DOUBAO_API_KEY",
     "temperature": 0.2,
-    "max_tokens": 2048,
-    "throttle_sec": 0.2,
-    "analysis_concurrency": 2,
-    "enrichment_concurrency": 1,
-    "languages": ["zh-CN"]
+    "max_tokens": 384,
+    "throttle_sec": 0.0,
+    "analysis_concurrency": 4,
+    "enrichment_concurrency": 2,
+    "languages": ["zh"]
   },
   "processing": {
     "profiles_dir": "profiles",
     "default_profile": "travel-hotspot",
     "profile_settings": {
       "travel-hotspot": {
-        "threshold": 6.2,
+        "threshold": 4.5,
         "topic_dedup": true
       }
     }
@@ -31,7 +31,29 @@
       "min_score": 0,
       "profile": "travel-hotspot"
     },
-    "rss": [],
+    "rss": [
+      {
+        "name": "长三角旅游24小时",
+        "url": "https://news.google.com/rss/search?q=%28%22%E5%AE%89%E5%BE%BD%22+OR+%22%E6%B1%9F%E8%8B%8F%22+OR+%22%E6%B5%99%E6%B1%9F%22+OR+%22%E4%B8%8A%E6%B5%B7%22+OR+%22%E5%8D%97%E4%BA%AC%22+OR+%22%E5%90%88%E8%82%A5%22+OR+%22%E6%BB%81%E5%B7%9E%22%29+%28%22%E6%97%85%E6%B8%B8%22+OR+%22%E6%99%AF%E5%8C%BA%22+OR+%22%E6%96%87%E6%97%85%22%29+when%3A24h&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans",
+        "enabled": true,
+        "category": "yangtze-delta",
+        "profile": "travel-hotspot"
+      },
+      {
+        "name": "出游规则与风险24小时",
+        "url": "https://news.google.com/rss/search?q=%28%22%E6%99%AF%E5%8C%BA%22+OR+%22%E6%97%85%E6%B8%B8%22+OR+%22%E6%B8%B8%E5%AE%A2%22%29+%28%22%E9%97%AD%E5%9B%AD%22+OR+%22%E5%BC%80%E6%94%BE%22+OR+%22%E9%A2%84%E7%BA%A6%22+OR+%22%E9%99%90%E6%B5%81%22+OR+%22%E5%8F%B0%E9%A3%8E%22+OR+%22%E6%9A%B4%E9%9B%A8%22+OR+%22%E9%AB%98%E9%93%81%22+OR+%22%E8%88%AA%E7%8F%AD%22+OR+%22%E4%BA%A4%E9%80%9A%22%29+when%3A24h&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans",
+        "enabled": true,
+        "category": "travel-rules",
+        "profile": "travel-hotspot"
+      },
+      {
+        "name": "旅游新玩法24小时",
+        "url": "https://news.google.com/rss/search?q=%28%22%E5%A4%9C%E6%B8%B8%22+OR+%22%E4%BA%B2%E5%AD%90%E6%B8%B8%22+OR+%22%E9%81%BF%E6%9A%91%22+OR+%22%E6%BC%94%E5%94%B1%E4%BC%9A%22+OR+%22%E6%96%87%E6%97%85%E6%BC%94%E5%87%BA%22+OR+%22%E6%96%B0%E7%8E%A9%E6%B3%95%22+OR+%22%E6%96%87%E6%97%85%E4%B8%93%E5%88%97%22%29+when%3A24h&hl=zh-CN&gl=CN&ceid=CN%3Azh-Hans",
+        "enabled": true,
+        "category": "travel-trends",
+        "profile": "travel-hotspot"
+      }
+    ],
     "reddit": {
       "enabled": false,
       "subreddits": [],
@@ -75,12 +97,12 @@
     },
     "google_news": {
       "enabled": true,
-      "query": "旅游 OR 文旅 OR 景区 OR 游客 OR 暑期旅游 OR 避暑旅游 OR 亲子游 OR 夜游",
+      "query": "(\"旅游\" OR \"文旅\" OR \"景区\" OR \"游客\" OR \"出游\") -股票 -基金 -能源 -AI -人工智能",
       "language": "zh-CN",
       "country": "CN",
       "ceid": "CN:zh-Hans",
-      "max_results": 100,
-      "category": "news",
+      "max_results": 80,
+      "category": "national-news",
       "profile": "travel-hotspot"
     }
   },
@@ -90,9 +112,30 @@
   "digest": {
     "max_items": 18,
     "profile_order": ["travel-hotspot"],
-    "category_groups": {},
+    "category_groups": {
+      "regional": {
+        "name": "长三角及周边",
+        "limit": 6,
+        "categories": ["yangtze-delta"]
+      },
+      "rules": {
+        "name": "规则交通与风险",
+        "limit": 5,
+        "categories": ["travel-rules"]
+      },
+      "trends": {
+        "name": "新玩法与趋势",
+        "limit": 5,
+        "categories": ["travel-trends"]
+      },
+      "national": {
+        "name": "全国旅游资讯",
+        "limit": 10,
+        "categories": ["national-news"]
+      }
+    },
     "default_group": "other",
-    "default_group_limit": null
+    "default_group_limit": 3
   },
   "webhook": {
     "enabled": false
