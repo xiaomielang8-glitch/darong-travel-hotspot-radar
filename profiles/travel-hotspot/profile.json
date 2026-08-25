@@ -6,6 +6,11 @@
   },
   "match": "match.md",
   "analysis": "analysis.md",
+  "content": {
+    "analysis_max_chars": 700,
+    "enrichment_max_chars": 900,
+    "sampling": "prefix"
+  },
   "enrichment": {
     "prompt": "enrichment.md",
     "blocks": [
@@ -14,18 +19,6 @@
         "type": "section",
         "tools": [],
         "primary": true
-      },
-      {
-        "id": "why_hot",
-        "type": "section",
-        "tools": [],
-        "optional": true
-      },
-      {
-        "id": "traveler_value",
-        "type": "section",
-        "tools": [],
-        "optional": true
       }
     ]
   }
