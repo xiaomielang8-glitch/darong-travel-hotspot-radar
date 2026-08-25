@@ -1,4 +1,4 @@
-name: Travel Hotspot V0.1
+name: Travel Hotspot V0.2
 
 on:
   pull_request:
@@ -31,7 +31,7 @@ jobs:
       - name: Validate Python syntax
         run: uv run python -m compileall -q src
 
-      - name: Validate travel hotspot config
+      - name: Validate travel hotspot V0.2 config
         run: |
           uv run python - <<'PY'
           from src.storage.manager import StorageManager
@@ -40,8 +40,14 @@ jobs:
           assert config.processing.default_profile == 'travel-hotspot'
           assert config.collection.time_window_hours == 24
           assert config.digest.max_items == 18
+          assert config.ai.provider.value == 'doubao'
+          assert config.ai.model == 'doubao-seed-2-0-mini-260215'
+          assert config.ai.max_tokens <= 384
+          assert config.ai.languages == ['zh']
           assert config.sources.google_news and config.sources.google_news.enabled
-          print('travel-hotspot config OK')
+          assert len(config.sources.rss) >= 3
+          assert config.processing.profile_settings['travel-hotspot'].threshold == 4.5
+          print('travel-hotspot V0.2 config OK')
           PY
 
   manual-run:
@@ -68,7 +74,7 @@ jobs:
       - name: Prepare travel hotspot config
         run: cp data/config.travel-hotspot.json data/config.json
 
-      - name: Run 24-hour travel hotspot radar
+      - name: Run 24-hour travel hotspot radar V0.2
         env:
           DOUBAO_API_KEY: ${{ secrets.DOUBAO_API_KEY }}
         run: uv run horizon --hours 24
@@ -77,7 +83,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: travel-hotspot-output
+          name: travel-hotspot-v0-2-output
           path: |
             data/summaries/**
             docs/**
