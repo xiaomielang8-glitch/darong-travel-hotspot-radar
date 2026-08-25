@@ -74,10 +74,43 @@ jobs:
       - name: Prepare travel hotspot config
         run: cp data/config.travel-hotspot.json data/config.json
 
+      - name: Smoke test Doubao Seed 2.0 Mini
+        env:
+          DOUBAO_API_KEY: ${{ secrets.DOUBAO_API_KEY }}
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+          from src.storage.manager import StorageManager
+          from src.ai.client import create_ai_client
+
+          storage = StorageManager(data_dir='data', config_path='data/config.travel-hotspot.json')
+          config = storage.load_config()
+          client = create_ai_client(config.ai)
+
+          async def main():
+              result = await client.complete(
+                  system='Return valid JSON only.',
+                  user='Reply exactly with {"ok": true}.',
+                  temperature=0.0,
+                  max_tokens=64,
+              )
+              if 'ok' not in result.lower():
+                  raise RuntimeError(f'Unexpected Doubao smoke-test response: {result[:200]}')
+              print('Doubao Seed 2.0 Mini smoke test OK')
+
+          asyncio.run(main())
+          PY
+
       - name: Run 24-hour travel hotspot radar V0.2
         env:
           DOUBAO_API_KEY: ${{ secrets.DOUBAO_API_KEY }}
-        run: uv run horizon --hours 24
+        run: |
+          set -o pipefail
+          uv run horizon --hours 24 2>&1 | tee /tmp/travel-hotspot-v0-2.log
+          if grep -q 'Selected 0 items with profile filters' /tmp/travel-hotspot-v0-2.log; then
+            echo 'Business gate failed: radar produced zero candidates.'
+            exit 1
+          fi
 
       - name: Upload radar output
         if: always()
@@ -87,5 +120,6 @@ jobs:
           path: |
             data/summaries/**
             docs/**
+            /tmp/travel-hotspot-v0-2.log
           if-no-files-found: warn
           retention-days: 7
