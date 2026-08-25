@@ -1,0 +1,85 @@
+name: Travel Hotspot V0.1
+
+on:
+  pull_request:
+    paths:
+      - 'data/config.travel-hotspot.json'
+      - 'profiles/travel-hotspot/**'
+      - '.github/workflows/travel-hotspot-v0-1.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.26'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate Python syntax
+        run: uv run python -m compileall -q src
+
+      - name: Validate travel hotspot config
+        run: |
+          uv run python - <<'PY'
+          from src.storage.manager import StorageManager
+          storage = StorageManager(data_dir='data', config_path='data/config.travel-hotspot.json')
+          config = storage.load_config()
+          assert config.processing.default_profile == 'travel-hotspot'
+          assert config.collection.time_window_hours == 24
+          assert config.digest.max_items == 18
+          assert config.sources.google_news and config.sources.google_news.enabled
+          print('travel-hotspot config OK')
+          PY
+
+  manual-run:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.26'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Prepare travel hotspot config
+        run: cp data/config.travel-hotspot.json data/config.json
+
+      - name: Run 24-hour travel hotspot radar
+        env:
+          DOUBAO_API_KEY: ${{ secrets.DOUBAO_API_KEY }}
+        run: uv run horizon --hours 24
+
+      - name: Upload radar output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: travel-hotspot-output
+          path: |
+            data/summaries/**
+            docs/**
+          if-no-files-found: warn
+          retention-days: 7
