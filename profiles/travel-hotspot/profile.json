@@ -1,0 +1,32 @@
+{
+  "id": "travel-hotspot",
+  "name": "Travel Hotspot Radar",
+  "display_names": {
+    "zh": "旅游热点"
+  },
+  "match": "match.md",
+  "analysis": "analysis.md",
+  "enrichment": {
+    "prompt": "enrichment.md",
+    "blocks": [
+      {
+        "id": "summary",
+        "type": "section",
+        "tools": [],
+        "primary": true
+      },
+      {
+        "id": "why_hot",
+        "type": "section",
+        "tools": [],
+        "optional": true
+      },
+      {
+        "id": "traveler_value",
+        "type": "section",
+        "tools": [],
+        "optional": true
+      }
+    ]
+  }
+}

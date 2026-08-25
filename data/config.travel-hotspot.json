@@ -1,0 +1,100 @@
+{
+  "ai": {
+    "provider": "doubao",
+    "model": "ep-20250715141929-kvxj4",
+    "api_key_env": "DOUBAO_API_KEY",
+    "temperature": 0.2,
+    "max_tokens": 2048,
+    "throttle_sec": 0.2,
+    "analysis_concurrency": 2,
+    "enrichment_concurrency": 1,
+    "languages": ["zh-CN"]
+  },
+  "processing": {
+    "profiles_dir": "profiles",
+    "default_profile": "travel-hotspot",
+    "profile_settings": {
+      "travel-hotspot": {
+        "threshold": 6.2,
+        "topic_dedup": true
+      }
+    }
+  },
+  "display": {
+    "icon_style": "emoji"
+  },
+  "sources": {
+    "github": [],
+    "hackernews": {
+      "enabled": false,
+      "fetch_top_stories": 0,
+      "min_score": 0,
+      "profile": "travel-hotspot"
+    },
+    "rss": [],
+    "reddit": {
+      "enabled": false,
+      "subreddits": [],
+      "users": [],
+      "fetch_comments": 0
+    },
+    "telegram": {
+      "enabled": false,
+      "channels": []
+    },
+    "twitter": {
+      "enabled": false,
+      "users": [],
+      "fetch_limit": 0,
+      "profile": "travel-hotspot"
+    },
+    "openbb": {
+      "enabled": false,
+      "watchlists": [],
+      "fetch_filings": false
+    },
+    "ossinsight": {
+      "enabled": false,
+      "period": "past_24_hours",
+      "languages": ["All"],
+      "keywords": [],
+      "min_stars": 0,
+      "max_items": 1,
+      "profile": "travel-hotspot"
+    },
+    "gdelt": {
+      "enabled": false,
+      "query": "tourism OR travel",
+      "mode": "ArtList",
+      "max_records": 75,
+      "timespan": "24h",
+      "language": null,
+      "country": null,
+      "category": "news",
+      "profile": "travel-hotspot"
+    },
+    "google_news": {
+      "enabled": true,
+      "query": "旅游 OR 文旅 OR 景区 OR 游客 OR 暑期旅游 OR 避暑旅游 OR 亲子游 OR 夜游",
+      "language": "zh-CN",
+      "country": "CN",
+      "ceid": "CN:zh-Hans",
+      "max_results": 100,
+      "category": "news",
+      "profile": "travel-hotspot"
+    }
+  },
+  "collection": {
+    "time_window_hours": 24
+  },
+  "digest": {
+    "max_items": 18,
+    "profile_order": ["travel-hotspot"],
+    "category_groups": {},
+    "default_group": "other",
+    "default_group_limit": null
+  },
+  "webhook": {
+    "enabled": false
+  }
+}
