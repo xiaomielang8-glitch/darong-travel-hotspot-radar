@@ -51,6 +51,7 @@ PLACE_HINTS = (
 )
 
 ENTITY_RE = re.compile(r"([\u4e00-\u9fffA-Za-z0-9“”·]{2,18}(?:景区|乐园|岛|寺|山|古镇|公园|机场|港|湾|城|雪山|盐湖|草原|度假区))")
+ACTOR_RE = re.compile(r"演员([\u4e00-\u9fff]{2,4})")
 SOURCE_SUFFIX_RE = re.compile(r"\s+-\s+[^-]{1,50}$")
 
 
@@ -143,6 +144,14 @@ def same_event(a: dict, b: dict) -> bool:
     fa, fb = event_family(ta), event_family(tb)
     if fa != fb:
         return False
+
+    # Same actor + NPC + same trend family is a strong specific anchor. This catches
+    # syndicated headlines such as “演员陈明当NPC走红” vs “演员陈明回应景区NPC走红”
+    # without lowering the generic similarity threshold for unrelated tourist stories.
+    if "npc" in ta.lower() and "npc" in tb.lower():
+        aa, ab = ACTOR_RE.search(ta), ACTOR_RE.search(tb)
+        if aa and ab and aa.group(1) == ab.group(1):
+            return True
 
     ea, eb = entities(ta), entities(tb)
     if ea & eb:
