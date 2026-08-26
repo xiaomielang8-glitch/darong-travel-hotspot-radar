@@ -1,0 +1,90 @@
+name: Travel Hotspot V0.5 Platform Trend Snapshot
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/build_platform_trend_snapshot.py'
+      - '.github/workflows/travel-hotspot-v0-5-trend-snapshot.yml'
+  pull_request:
+    paths:
+      - 'scripts/build_platform_trend_snapshot.py'
+      - '.github/workflows/travel-hotspot-v0-5-trend-snapshot.yml'
+  schedule:
+    # China time: 05:45, 08:45, 11:45, 14:45, 17:45, 20:45, 23:45, 02:45.
+    # The 05:45 snapshot lands shortly before the 06:00 daily candidate run.
+    - cron: '45 0,3,6,9,12,15,18,21 * * *'
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.26'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Restore rolling trend history
+        id: trend-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/platform-trend-state
+          key: travel-platform-trend-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            travel-platform-trend-${{ github.ref_name }}-
+
+      - name: Validate snapshot syntax
+        run: |
+          uv run python -m py_compile scripts/probe_cn_hot_platforms.py
+          uv run python -m py_compile scripts/build_platform_trend_snapshot.py
+
+      - name: Capture platform trend snapshot
+        run: uv run python scripts/build_platform_trend_snapshot.py
+
+      - name: Validate strict freshness metadata
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          files = sorted(Path('data/trend-snapshots').glob('platform-trend-delta-*.json'))
+          if not files:
+              raise SystemExit('No platform trend snapshot produced')
+          data = json.loads(files[-1].read_text(encoding='utf-8'))
+          if data.get('strict_window_hours') != 24:
+              raise SystemExit('Trend snapshot lost strict 24h rule')
+          gap = data.get('previous_gap_hours')
+          if data.get('deltas') and (gap is None or gap > 6):
+              raise SystemExit(f'Delta lacks a <=6h comparison proof: gap={gap}')
+          print(
+              f"Trend snapshot OK: baseline={data.get('baseline_seeded')}, "
+              f"delta_count={len(data.get('deltas', []))}, gap={gap}"
+          )
+          PY
+
+      - name: Save rolling trend history
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: data/platform-trend-state
+          key: travel-platform-trend-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: Upload trend snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: travel-hotspot-v0-5-trend-snapshot
+          path: data/trend-snapshots/**
+          if-no-files-found: warn
+          retention-days: 3
