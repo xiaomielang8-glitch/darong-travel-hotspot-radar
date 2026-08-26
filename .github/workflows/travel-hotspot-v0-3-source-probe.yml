@@ -1,6 +1,10 @@
 name: Travel Hotspot V0.3 Source Probe
 
 on:
+  pull_request:
+    paths:
+      - 'scripts/probe_cn_travel_sources.py'
+      - '.github/workflows/travel-hotspot-v0-3-source-probe.yml'
   workflow_dispatch:
 
 jobs:
