@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - 'scripts/build_travel_candidate_prefilter.py'
+      - 'scripts/refine_travel_candidate_pool.py'
       - 'scripts/feedparser.py'
       - '.github/workflows/travel-hotspot-v0-3-prefilter.yml'
 
@@ -31,12 +32,13 @@ jobs:
       - name: Validate prefilter syntax
         run: |
           uv run python -m py_compile scripts/build_travel_candidate_prefilter.py
+          uv run python -m py_compile scripts/refine_travel_candidate_pool.py
           uv run python -m py_compile scripts/feedparser.py
 
-      - name: Build strict-24h pre-candidate pool
+      - name: Build strict-24h raw pre-candidate pool
         run: uv run python scripts/build_travel_candidate_prefilter.py
 
-      - name: Validate pool output
+      - name: Validate raw pool
         run: |
           uv run python - <<'PY'
           import json
@@ -52,7 +54,29 @@ jobs:
               raise SystemExit('Prefilter produced zero candidates')
           if count > 60:
               raise SystemExit(f'Prefilter exceeded pool cap: {count}')
-          print(f'Prefilter business gate OK: {count} candidates')
+          print(f'Raw prefilter gate OK: {count} candidates')
+          PY
+
+      - name: Refine without LLM
+        run: uv run python scripts/refine_travel_candidate_pool.py
+
+      - name: Validate refined pool
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          files = sorted(Path('data/candidate-pools').glob('travel-refined-*.json'))
+          if not files:
+              raise SystemExit('No refined JSON produced')
+          data = json.loads(files[-1].read_text(encoding='utf-8'))
+          if data.get('strict_window_hours') != 24:
+              raise SystemExit('Refined pool lost strict 24h gate')
+          count = len(data.get('candidates', []))
+          if count < 12:
+              raise SystemExit(f'Refined pool too small: {count}')
+          if count > 35:
+              raise SystemExit(f'Refined pool too large: {count}')
+          print(f'Refined business gate OK: {count} candidates; no LLM used')
           PY
 
       - name: Upload prefilter output
