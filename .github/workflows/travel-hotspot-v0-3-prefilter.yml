@@ -42,7 +42,19 @@ jobs:
           uv run python -m py_compile scripts/feedparser.py
 
       - name: Build strict-24h raw pre-candidate pool
-        run: uv run python scripts/build_travel_candidate_prefilter.py
+        run: |
+          set -e
+          for attempt in 1 2 3; do
+            echo "Prefilter collection attempt ${attempt}/3"
+            if uv run python scripts/build_travel_candidate_prefilter.py; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 5))
+            fi
+          done
+          echo "Prefilter collection failed after 3 attempts"
+          exit 1
 
       - name: Add verified Weibo hot-search signals
         run: uv run python scripts/augment_prefilter_with_weibo.py
