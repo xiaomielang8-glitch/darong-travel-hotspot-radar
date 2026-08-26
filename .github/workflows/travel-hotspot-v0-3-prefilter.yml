@@ -10,6 +10,7 @@ on:
       - 'scripts/build_travel_candidate_prefilter.py'
       - 'scripts/build_travel_candidate_prefilter_resilient.py'
       - 'scripts/augment_prefilter_with_weibo.py'
+      - 'scripts/augment_prefilter_with_trend_delta.py'
       - 'scripts/refine_travel_candidate_pool.py'
       - 'scripts/feedparser.py'
       - '.github/workflows/travel-hotspot-v0-3-prefilter.yml'
@@ -35,11 +36,20 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      - name: Restore latest V0.5 rolling trend history
+        uses: actions/cache/restore@v4
+        with:
+          path: data/platform-trend-state
+          key: travel-platform-trend-handoff-${{ github.run_id }}
+          restore-keys: |
+            travel-platform-trend-main-
+
       - name: Validate prefilter syntax
         run: |
           uv run python -m py_compile scripts/build_travel_candidate_prefilter.py
           uv run python -m py_compile scripts/build_travel_candidate_prefilter_resilient.py
           uv run python -m py_compile scripts/augment_prefilter_with_weibo.py
+          uv run python -m py_compile scripts/augment_prefilter_with_trend_delta.py
           uv run python -m py_compile scripts/refine_travel_candidate_pool.py
           uv run python -m py_compile scripts/feedparser.py
 
@@ -48,6 +58,9 @@ jobs:
 
       - name: Add verified Weibo hot-search signals
         run: uv run python scripts/augment_prefilter_with_weibo.py
+
+      - name: Add proven platform trend deltas
+        run: uv run python scripts/augment_prefilter_with_trend_delta.py
 
       - name: Validate raw pool
         run: |
@@ -69,6 +82,9 @@ jobs:
           print(f'Raw prefilter gate OK: {count} candidates')
           print(f"Google queries succeeded: {stats.get('google_query_successes', '-')}/{stats.get('google_query_total', '-')}")
           print(f"Weibo verified: {stats.get('weibo_verified', 0)}")
+          print(f"Trend delta added: {stats.get('trend_delta_added', 0)}")
+          if stats.get('trend_delta_diagnostic'):
+              print(f"Trend delta diagnostic: {stats.get('trend_delta_diagnostic')}")
           if stats.get('source_errors'):
               print(f"Isolated source errors: {stats.get('source_errors')}")
           PY
