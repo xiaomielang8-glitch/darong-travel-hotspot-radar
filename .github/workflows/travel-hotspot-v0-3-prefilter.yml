@@ -1,0 +1,62 @@
+name: Travel Hotspot V0.3 Candidate Prefilter
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/build_travel_candidate_prefilter.py'
+      - '.github/workflows/travel-hotspot-v0-3-prefilter.yml'
+
+jobs:
+  prefilter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.26'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate prefilter syntax
+        run: uv run python -m py_compile scripts/build_travel_candidate_prefilter.py
+
+      - name: Build strict-24h pre-candidate pool
+        run: uv run python scripts/build_travel_candidate_prefilter.py
+
+      - name: Validate pool output
+        run: |
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+          files = sorted(Path('data/candidate-pools').glob('travel-prefilter-*.json'))
+          if not files:
+              raise SystemExit('No prefilter JSON produced')
+          data = json.loads(files[-1].read_text(encoding='utf-8'))
+          if data.get('strict_window_hours') != 24:
+              raise SystemExit('Strict 24h gate missing')
+          count = len(data.get('candidates', []))
+          if count == 0:
+              raise SystemExit('Prefilter produced zero candidates')
+          if count > 60:
+              raise SystemExit(f'Prefilter exceeded pool cap: {count}')
+          print(f'Prefilter business gate OK: {count} candidates')
+          PY
+
+      - name: Upload prefilter output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: travel-hotspot-v0-3-prefilter
+          path: data/candidate-pools/**
+          if-no-files-found: warn
+          retention-days: 7
