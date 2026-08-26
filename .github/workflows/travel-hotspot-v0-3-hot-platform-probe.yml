@@ -1,4 +1,4 @@
-name: Travel Hotspot V0.3 Hot Platform Probe
+name: Travel Hotspot V0.4 Platform Discovery Probe
 
 on:
   workflow_dispatch:
@@ -10,6 +10,7 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 8
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -30,14 +31,14 @@ jobs:
       - name: Validate probe syntax
         run: uv run python -m py_compile scripts/probe_cn_hot_platforms.py
 
-      - name: Probe Chinese hot platforms with strict 24h rule
+      - name: Probe Chinese platforms with strict 24h rule
         run: uv run python scripts/probe_cn_hot_platforms.py
 
       - name: Upload probe report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: travel-hotspot-v0-3-hot-platform-probe
-          path: data/probes/cn-hot-platforms-*
+          name: travel-hotspot-v0-4-platform-discovery-probe
+          path: data/probes/cn-hot-platforms-v0-4-*
           if-no-files-found: warn
           retention-days: 7

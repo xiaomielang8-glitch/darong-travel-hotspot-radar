@@ -1,14 +1,20 @@
-"""Probe public Chinese hot-platform pages for travel-relevant signals.
+"""Probe public Chinese platforms for travel-relevant hotspot signals.
 
 Strict rule: no content older than 24 hours may become a formal candidate.
-Realtime/trending boards without publish time are treated as snapshot signals only;
-they require a rank/new-entry change observed within 24 hours before formal use.
-No login, anti-bot bypass, or article-body scraping is performed.
+Realtime/trending boards without publish time are snapshot signals only; they need
+24-hour rank/new-entry evidence before formal use.
+
+V0.4 improvements:
+- prefer Weibo's public JSON hot-search endpoint, with HTML fallback;
+- add targeted Bilibili travel-video search instead of relying only on the all-site ranking;
+- keep Toutiao/Baidu realtime boards as trend-signal sources;
+- no login, anti-bot bypass, article-body scraping, or LLM call.
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -29,6 +35,12 @@ TRAVEL_TERMS = (
     "旅游", "旅行", "景区", "景点", "游客", "文旅", "酒店", "民宿", "门票", "机场", "航班",
     "高铁", "火车", "自驾", "露营", "避暑", "亲子", "海边", "打卡", "夜游", "博物馆",
     "演唱会", "台风", "暴雨", "闭园", "开放", "滞留", "出游", "游玩", "古镇", "乐园",
+    "漂流", "徒步", "海岛", "索道", "游船", "度假", "研学", "签证",
+)
+
+# These are discovery queries, not automatic-candidate rules. A returned video still has to be <=24h.
+BILIBILI_TRAVEL_QUERIES = (
+    "旅游", "旅行", "景区", "自驾游", "博物馆", "乐园", "海边旅行", "露营旅行",
 )
 
 
@@ -41,6 +53,7 @@ class Signal:
     published_at: str | None = None
     direct_24h_eligible: bool = False
     travel_match: bool = False
+    context: str = ""
 
 
 @dataclass
@@ -60,8 +73,12 @@ def clean(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def travel_match(title: str) -> bool:
-    return any(term in title for term in TRAVEL_TERMS)
+def strip_html(value: str) -> str:
+    return clean(BeautifulSoup(html.unescape(value or ""), "html.parser").get_text(" ", strip=True))
+
+
+def travel_match(text: str) -> bool:
+    return any(term in text for term in TRAVEL_TERMS)
 
 
 def within_24h(ts: datetime | None, now: datetime) -> bool:
@@ -72,7 +89,7 @@ def within_24h(ts: datetime | None, now: datetime) -> bool:
     return now - timedelta(hours=24) <= ts <= now + timedelta(minutes=10)
 
 
-def dedupe(items: list[Signal], limit: int = 100) -> list[Signal]:
+def dedupe(items: list[Signal], limit: int = 160) -> list[Signal]:
     seen: set[str] = set()
     out: list[Signal] = []
     for item in items:
@@ -87,16 +104,59 @@ def dedupe(items: list[Signal], limit: int = 100) -> list[Signal]:
 
 
 async def probe_weibo(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
-    url = "https://s.weibo.com/top/summary?cate=realtimehot"
+    json_url = "https://weibo.com/ajax/side/hotSearch"
+    html_url = "https://s.weibo.com/top/summary?cate=realtimehot"
     result = ProbeResult(
         key="weibo_realtime",
         name="微博实时热搜",
-        url=url,
+        url=json_url,
         status="failure",
         rule="实时榜单只作当前快照；正式入选需证明24小时内新上榜/明显升温，不能把旧事件因仍在榜上直接算新热点。",
     )
+
+    json_error = ""
     try:
-        resp = await client.get(url)
+        resp = await client.get(
+            json_url,
+            headers={
+                "Referer": "https://weibo.com/",
+                "Accept": "application/json, text/plain, */*",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        )
+        result.http_status = resp.status_code
+        result.final_url = str(resp.url)
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = ((payload.get("data") or {}).get("realtime") or [])
+        items: list[Signal] = []
+        for idx, row in enumerate(rows, start=1):
+            title = clean(str(row.get("word") or row.get("note") or ""))
+            if not title:
+                continue
+            hot = str(row.get("num") or row.get("raw_hot") or row.get("raw_hot_score") or "")
+            items.append(
+                Signal(
+                    rank=idx,
+                    title=title,
+                    url=f"https://s.weibo.com/weibo?q={quote(title)}",
+                    hot=hot,
+                    travel_match=travel_match(title),
+                    context="weibo_json",
+                )
+            )
+        result.signals = dedupe(items)
+        if result.signals:
+            result.status = "success"
+            return result
+        json_error = "JSON endpoint returned no hot-search rows"
+    except Exception as exc:
+        json_error = f"{type(exc).__name__}: {exc}"
+
+    # Fallback to the public HTML page. It often returns 200 with an empty table on cloud runners,
+    # but retaining the fallback gives us a clean diagnostic instead of silently failing.
+    try:
+        resp = await client.get(html_url, headers={"Referer": "https://s.weibo.com/"})
         result.http_status = resp.status_code
         result.final_url = str(resp.url)
         resp.raise_for_status()
@@ -116,25 +176,27 @@ async def probe_weibo(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
             hot = clean(hot_node.get_text(" ", strip=True)) if hot_node else ""
             href = a.get("href", "")
             link = "https://s.weibo.com" + href if href.startswith("/") else href
-            items.append(Signal(rank=rank, title=title, url=link, hot=hot, travel_match=travel_match(title)))
+            items.append(Signal(rank=rank, title=title, url=link, hot=hot, travel_match=travel_match(title), context="weibo_html"))
         result.signals = dedupe(items)
         result.status = "success" if result.signals else "empty"
+        if not result.signals:
+            result.error = f"JSON: {json_error}; HTML fallback returned no rows"
     except Exception as exc:
-        result.error = f"{type(exc).__name__}: {exc}"
+        result.error = f"JSON: {json_error}; HTML: {type(exc).__name__}: {exc}"
     return result
 
 
-async def probe_bilibili(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
+async def probe_bilibili_ranking(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
     url = "https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all"
     result = ProbeResult(
         key="bilibili_ranking",
         name="B站全站热门榜",
         url=url,
         status="failure",
-        rule="发布时间在24小时内的热门视频可直接进入预筛；旧视频即使当前上榜，也只能作为趋势快照，需24小时内排名变化证据。",
+        rule="发布时间在24小时内且明确旅行相关的热门视频可进入预筛；旧视频即使当前上榜，也只能作为趋势快照。",
     )
     try:
-        resp = await client.get(url)
+        resp = await client.get(url, headers={"Referer": "https://www.bilibili.com/"})
         result.http_status = resp.status_code
         result.final_url = str(resp.url)
         resp.raise_for_status()
@@ -147,28 +209,102 @@ async def probe_bilibili(client: httpx.AsyncClient, now: datetime) -> ProbeResul
                 continue
             bvid = str(row.get("bvid") or "")
             pub_ts = row.get("pubdate")
-            published = None
-            dt = None
-            if isinstance(pub_ts, (int, float)):
-                dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc)
-                published = dt.isoformat()
+            dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc) if isinstance(pub_ts, (int, float)) else None
             stat = row.get("stat") or {}
-            hot = f"播放{stat.get('view', 0)}｜赞{stat.get('like', 0)}"
             items.append(
                 Signal(
                     rank=idx,
                     title=title,
                     url=f"https://www.bilibili.com/video/{bvid}" if bvid else "https://www.bilibili.com/v/popular/rank/all",
-                    hot=hot,
-                    published_at=published,
+                    hot=f"播放{stat.get('view', 0)}｜赞{stat.get('like', 0)}",
+                    published_at=dt.isoformat() if dt else None,
                     direct_24h_eligible=within_24h(dt, now),
                     travel_match=travel_match(title),
+                    context="all_site_ranking",
                 )
             )
         result.signals = dedupe(items)
         result.status = "success" if result.signals else "empty"
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+async def fetch_bilibili_search_query(client: httpx.AsyncClient, keyword: str, now: datetime) -> tuple[list[Signal], str | None, int | None]:
+    url = "https://api.bilibili.com/x/web-interface/search/type"
+    try:
+        resp = await client.get(
+            url,
+            params={
+                "search_type": "video",
+                "keyword": keyword,
+                "order": "pubdate",
+                "page": 1,
+            },
+            headers={"Referer": "https://search.bilibili.com/"},
+        )
+        status = resp.status_code
+        resp.raise_for_status()
+        payload = resp.json()
+        if payload.get("code") != 0:
+            return [], f"code={payload.get('code')} message={payload.get('message')}", status
+        rows = ((payload.get("data") or {}).get("result") or [])
+        out: list[Signal] = []
+        for row in rows:
+            title = strip_html(str(row.get("title") or ""))
+            if not title:
+                continue
+            pub_ts = row.get("pubdate")
+            dt = datetime.fromtimestamp(pub_ts, tz=timezone.utc) if isinstance(pub_ts, (int, float)) else None
+            if not within_24h(dt, now):
+                continue
+            bvid = str(row.get("bvid") or "")
+            play = row.get("play") or 0
+            favorites = row.get("favorites") or 0
+            description = strip_html(str(row.get("description") or ""))
+            tag = clean(str(row.get("tag") or ""))
+            combined = " ".join((title, description, tag, keyword))
+            out.append(
+                Signal(
+                    rank=None,
+                    title=title,
+                    url=f"https://www.bilibili.com/video/{bvid}" if bvid else f"https://search.bilibili.com/all?keyword={quote(keyword)}",
+                    hot=f"播放{play}｜收藏{favorites}",
+                    published_at=dt.isoformat() if dt else None,
+                    direct_24h_eligible=True,
+                    travel_match=travel_match(combined),
+                    context=f"搜索:{keyword}",
+                )
+            )
+        return out, None, status
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}", None
+
+
+async def probe_bilibili_travel_search(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
+    url = "https://api.bilibili.com/x/web-interface/search/type"
+    result = ProbeResult(
+        key="bilibili_travel_search",
+        name="B站旅行关键词24h搜索",
+        url=url,
+        status="failure",
+        rule="仅保留发布时间≤24小时的旅行关键词搜索结果；本探针只验证发现能力，正式接入前还需按播放/互动和事件价值继续过滤。",
+    )
+    batches = await asyncio.gather(*(fetch_bilibili_search_query(client, keyword, now) for keyword in BILIBILI_TRAVEL_QUERIES))
+    items: list[Signal] = []
+    errors: list[str] = []
+    statuses: list[int] = []
+    for keyword, (signals, error, status) in zip(BILIBILI_TRAVEL_QUERIES, batches):
+        items.extend(signals)
+        if status is not None:
+            statuses.append(status)
+        if error:
+            errors.append(f"{keyword}:{error}")
+    result.http_status = statuses[0] if statuses else None
+    result.signals = dedupe(items)
+    result.status = "success" if result.signals else ("empty" if not errors else "failure")
+    if errors:
+        result.error = "; ".join(errors[:5])
     return result
 
 
@@ -197,7 +333,7 @@ async def probe_toutiao(client: httpx.AsyncClient, now: datetime) -> ProbeResult
             hot = str(row.get("HotValue") or row.get("hot_value") or "")
             if not link:
                 link = f"https://www.toutiao.com/search/?keyword={quote(title)}"
-            items.append(Signal(rank=idx, title=title, url=link, hot=hot, travel_match=travel_match(title)))
+            items.append(Signal(rank=idx, title=title, url=link, hot=hot, travel_match=travel_match(title), context="realtime_board"))
         result.signals = dedupe(items)
         result.status = "success" if result.signals else "empty"
     except Exception as exc:
@@ -230,12 +366,12 @@ async def probe_baidu(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
                 continue
             hot_node = card.select_one("div.hot-index_1Bl1a")
             hot = clean(hot_node.get_text(" ", strip=True)) if hot_node else ""
-            items.append(Signal(rank=idx, title=title, url=a.get("href", ""), hot=hot, travel_match=travel_match(title)))
+            items.append(Signal(rank=idx, title=title, url=a.get("href", ""), hot=hot, travel_match=travel_match(title), context="realtime_board"))
         if not items:
             for idx, a in enumerate(soup.select("a[href*='baidu.com/s?']")[:60], start=1):
                 title = clean(a.get_text(" ", strip=True))
                 if 4 <= len(title) <= 80:
-                    items.append(Signal(rank=idx, title=title, url=a.get("href", ""), travel_match=travel_match(title)))
+                    items.append(Signal(rank=idx, title=title, url=a.get("href", ""), travel_match=travel_match(title), context="fallback_links"))
         result.signals = dedupe(items)
         result.status = "success" if result.signals else "empty"
     except Exception as exc:
@@ -245,11 +381,11 @@ async def probe_baidu(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
 
 def render(results: list[ProbeResult], now: datetime) -> str:
     lines = [
-        "# V0.3 中国热点平台24小时探针",
+        "# V0.4 中国热点平台24小时发现探针",
         "",
         f"生成时间：{now.astimezone(CN_TZ).isoformat(timespec='seconds')}",
         "",
-        "硬规则：正式候选不得超过24小时。无可靠发布时间的实时榜单，只能保存当前快照；必须用24小时内的新上榜/排名变化证明新鲜度。",
+        "硬规则：正式候选不得超过24小时。无可靠发布时间的实时榜单只能保存快照，必须用24小时内的新上榜/排名变化证明新鲜度。",
         "",
         "| 来源 | 状态 | HTTP | 总信号 | 旅行相关 | 可直接确认24h新内容 |",
         "|---|---:|---:|---:|---:|---:|",
@@ -257,22 +393,25 @@ def render(results: list[ProbeResult], now: datetime) -> str:
     for r in results:
         lines.append(
             f"| {r.name} | {r.status} | {r.http_status or '-'} | {len(r.signals)} | "
-            f"{sum(s.travel_match for s in r.signals)} | {sum(s.direct_24h_eligible for s in r.signals)} |"
+            f"{sum(s.travel_match for s in r.signals)} | {sum(s.direct_24h_eligible and s.travel_match for s in r.signals)} |"
         )
     for r in results:
         lines.extend(["", f"## {r.name}", "", r.rule])
         if r.error:
-            lines.extend(["", f"错误：`{r.error}`"])
-            continue
+            lines.extend(["", f"诊断：`{r.error}`"])
         matches = [s for s in r.signals if s.travel_match]
-        show = matches[:15] if matches else r.signals[:10]
+        show = matches[:20] if matches else r.signals[:10]
         lines.append("")
+        if not show:
+            lines.append("- 无可展示信号")
+            continue
         for s in show:
             rank = f"#{s.rank} " if s.rank else ""
             hot = f"｜{s.hot}" if s.hot else ""
             published = f"｜{s.published_at}" if s.published_at else ""
-            eligible = "｜24h可直接预筛" if s.direct_24h_eligible else "｜需24h趋势差分"
-            lines.append(f"- {rank}[{s.title}]({s.url}){hot}{published}{eligible}")
+            context = f"｜{s.context}" if s.context else ""
+            eligible = "｜24h可直接预筛" if s.direct_24h_eligible and s.travel_match else "｜需24h趋势差分"
+            lines.append(f"- {rank}[{s.title}]({s.url}){hot}{published}{context}{eligible}")
     return "\n".join(lines) + "\n"
 
 
@@ -286,7 +425,8 @@ async def main() -> None:
     async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(25.0), follow_redirects=True) as client:
         results = await asyncio.gather(
             probe_weibo(client, now),
-            probe_bilibili(client, now),
+            probe_bilibili_ranking(client, now),
+            probe_bilibili_travel_search(client, now),
             probe_toutiao(client, now),
             probe_baidu(client, now),
         )
@@ -294,19 +434,27 @@ async def main() -> None:
     out_dir = Path("data/probes")
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = now.astimezone(CN_TZ).strftime("%Y-%m-%d-%H%M")
-    json_path = out_dir / f"cn-hot-platforms-{stamp}.json"
-    md_path = out_dir / f"cn-hot-platforms-{stamp}.md"
-    json_path.write_text(json.dumps({"generated_at": now.isoformat(), "strict_window_hours": 24, "results": [asdict(r) for r in results]}, ensure_ascii=False, indent=2), encoding="utf-8")
+    json_path = out_dir / f"cn-hot-platforms-v0-4-{stamp}.json"
+    md_path = out_dir / f"cn-hot-platforms-v0-4-{stamp}.md"
+    json_path.write_text(
+        json.dumps(
+            {"generated_at": now.isoformat(), "strict_window_hours": 24, "results": [asdict(r) for r in results]},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     md_path.write_text(render(list(results), now), encoding="utf-8")
 
-    print("Chinese hot-platform 24h probe completed")
+    print("Chinese platform discovery V0.4 probe completed")
     for r in results:
         print(
             f"- {r.name}: {r.status}, HTTP={r.http_status}, signals={len(r.signals)}, "
-            f"travel={sum(s.travel_match for s in r.signals)}, direct24h={sum(s.direct_24h_eligible for s in r.signals)}"
+            f"travel={sum(s.travel_match for s in r.signals)}, "
+            f"direct24h_travel={sum(s.direct_24h_eligible and s.travel_match for s in r.signals)}"
         )
         if r.error:
-            print(f"  error={r.error}")
+            print(f"  diagnostic={r.error}")
     print(f"JSON: {json_path}")
     print(f"Markdown: {md_path}")
 
