@@ -25,7 +25,7 @@ from build_travel_candidate_prefilter import (
     find_fresh_evidence,
     merge_similar,
     normalize_title,
-    should_keep,
+    title_score,
 )
 
 USER_AGENT = (
@@ -34,6 +34,33 @@ USER_AGENT = (
     "Chrome/151.0.0.0 Safari/537.36"
 )
 MAX_POOL = 60
+
+# Weibo is a discovery surface, not a news corpus. Use traveller-facing semantics instead
+# of the stricter generic-news prefilter. In particular, concerts and destination events
+# can materially change travel demand even when the title does not contain “旅游/游客”.
+WEIBO_TRAVEL_TERMS = (
+    "旅游", "旅行", "出游", "游客", "旅客", "景区", "景点", "门票", "预约", "限流",
+    "闭园", "开园", "恢复开放", "暂停开放", "民宿", "酒店", "自驾", "夜游", "亲子游",
+    "避暑", "海边", "海岛", "古镇", "博物馆", "乐园", "漂流", "露营", "徒步", "研学",
+    "机场", "航班", "高铁", "列车", "火车", "签证", "免签", "停航", "停运", "索道",
+    "游船", "演唱会", "音乐节", "马拉松", "赛事", "环球影城", "迪士尼",
+)
+WEIBO_GENERIC_NOISE = (
+    "安全防护攻略", "防护攻略", "请收好", "生活小妙招", "科普", "教程",
+)
+
+
+def weibo_travel_signal(title: str) -> tuple[bool, float, list[str]]:
+    if any(noise in title for noise in WEIBO_GENERIC_NOISE):
+        return False, 0.0, ["泛生活/安全指南"]
+    hits = [term for term in WEIBO_TRAVEL_TERMS if term in title]
+    if not hits:
+        return False, 0.0, []
+    base_score, reasons = title_score(title)
+    # Being on Weibo realtime hot search is itself a strong propagation signal. The item
+    # still cannot enter the pool until find_fresh_evidence proves a <=24h event.
+    score = max(5.0, base_score)
+    return True, score, ["微博旅行语义:" + "/".join(hits[:3]), *reasons]
 
 
 async def fetch_weibo_trends(client: httpx.AsyncClient) -> list[TrendSignal]:
@@ -54,7 +81,7 @@ async def fetch_weibo_trends(client: httpx.AsyncClient) -> list[TrendSignal]:
         title = clean(str(row.get("word") or row.get("note") or ""))
         if not title:
             continue
-        keep, score, reasons = should_keep(title)
+        keep, score, reasons = weibo_travel_signal(title)
         if not keep:
             continue
         hot = str(row.get("num") or row.get("raw_hot") or row.get("raw_hot_score") or "")
