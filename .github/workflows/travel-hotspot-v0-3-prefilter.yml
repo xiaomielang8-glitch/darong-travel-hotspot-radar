@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - 'scripts/build_travel_candidate_prefilter.py'
+      - 'scripts/build_travel_candidate_prefilter_resilient.py'
       - 'scripts/augment_prefilter_with_weibo.py'
       - 'scripts/refine_travel_candidate_pool.py'
       - 'scripts/feedparser.py'
@@ -37,24 +38,13 @@ jobs:
       - name: Validate prefilter syntax
         run: |
           uv run python -m py_compile scripts/build_travel_candidate_prefilter.py
+          uv run python -m py_compile scripts/build_travel_candidate_prefilter_resilient.py
           uv run python -m py_compile scripts/augment_prefilter_with_weibo.py
           uv run python -m py_compile scripts/refine_travel_candidate_pool.py
           uv run python -m py_compile scripts/feedparser.py
 
       - name: Build strict-24h raw pre-candidate pool
-        run: |
-          set -e
-          for attempt in 1 2 3; do
-            echo "Prefilter collection attempt ${attempt}/3"
-            if uv run python scripts/build_travel_candidate_prefilter.py; then
-              exit 0
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              sleep $((attempt * 5))
-            fi
-          done
-          echo "Prefilter collection failed after 3 attempts"
-          exit 1
+        run: uv run python scripts/build_travel_candidate_prefilter_resilient.py
 
       - name: Add verified Weibo hot-search signals
         run: uv run python scripts/augment_prefilter_with_weibo.py
@@ -75,8 +65,12 @@ jobs:
               raise SystemExit('Prefilter produced zero candidates')
           if count > 60:
               raise SystemExit(f'Prefilter exceeded pool cap: {count}')
+          stats = data.get('stats') or {}
           print(f'Raw prefilter gate OK: {count} candidates')
-          print(f"Weibo verified: {(data.get('stats') or {}).get('weibo_verified', 0)}")
+          print(f"Google queries succeeded: {stats.get('google_query_successes', '-')}/{stats.get('google_query_total', '-')}")
+          print(f"Weibo verified: {stats.get('weibo_verified', 0)}")
+          if stats.get('source_errors'):
+              print(f"Isolated source errors: {stats.get('source_errors')}")
           PY
 
       - name: Refine without LLM
