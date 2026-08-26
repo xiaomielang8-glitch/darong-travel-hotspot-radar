@@ -2,6 +2,9 @@ name: Travel Hotspot V0.3 Candidate Prefilter
 
 on:
   workflow_dispatch:
+  schedule:
+    # GitHub cron uses UTC. 22:00 UTC = 06:00 China Standard Time (UTC+8).
+    - cron: '0 22 * * *'
   pull_request:
     paths:
       - 'scripts/build_travel_candidate_prefilter.py'
@@ -12,6 +15,7 @@ on:
 jobs:
   prefilter:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
