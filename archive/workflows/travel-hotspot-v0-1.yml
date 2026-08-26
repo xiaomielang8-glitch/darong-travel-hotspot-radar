@@ -1,0 +1,125 @@
+name: Travel Hotspot V0.2
+
+on:
+  pull_request:
+    paths:
+      - 'data/config.travel-hotspot.json'
+      - 'profiles/travel-hotspot/**'
+      - '.github/workflows/travel-hotspot-v0-1.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.26'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate Python syntax
+        run: uv run python -m compileall -q src
+
+      - name: Validate travel hotspot V0.2 config
+        run: |
+          uv run python - <<'PY'
+          from src.storage.manager import StorageManager
+          storage = StorageManager(data_dir='data', config_path='data/config.travel-hotspot.json')
+          config = storage.load_config()
+          assert config.processing.default_profile == 'travel-hotspot'
+          assert config.collection.time_window_hours == 24
+          assert config.digest.max_items == 18
+          assert config.ai.provider.value == 'doubao'
+          assert config.ai.model == 'doubao-seed-2-0-mini-260215'
+          assert config.ai.max_tokens <= 384
+          assert config.ai.languages == ['zh']
+          assert config.sources.google_news and config.sources.google_news.enabled
+          assert len(config.sources.rss) >= 3
+          assert config.processing.profile_settings['travel-hotspot'].threshold == 4.5
+          print('travel-hotspot V0.2 config OK')
+          PY
+
+  manual-run:
+    if: github.event_name == 'workflow_dispatch'
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.26'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Prepare travel hotspot config
+        run: cp data/config.travel-hotspot.json data/config.json
+
+      - name: Smoke test Doubao Seed 2.0 Mini
+        env:
+          DOUBAO_API_KEY: ${{ secrets.DOUBAO_API_KEY }}
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+          from src.storage.manager import StorageManager
+          from src.ai.client import create_ai_client
+
+          storage = StorageManager(data_dir='data', config_path='data/config.travel-hotspot.json')
+          config = storage.load_config()
+          client = create_ai_client(config.ai)
+
+          async def main():
+              result = await client.complete(
+                  system='Return valid JSON only.',
+                  user='Reply exactly with {"ok": true}.',
+                  temperature=0.0,
+                  max_tokens=64,
+              )
+              if 'ok' not in result.lower():
+                  raise RuntimeError(f'Unexpected Doubao smoke-test response: {result[:200]}')
+              print('Doubao Seed 2.0 Mini smoke test OK')
+
+          asyncio.run(main())
+          PY
+
+      - name: Run 24-hour travel hotspot radar V0.2
+        env:
+          DOUBAO_API_KEY: ${{ secrets.DOUBAO_API_KEY }}
+        run: |
+          set -o pipefail
+          uv run horizon --hours 24 2>&1 | tee /tmp/travel-hotspot-v0-2.log
+          if grep -q 'Selected 0 items with profile filters' /tmp/travel-hotspot-v0-2.log; then
+            echo 'Business gate failed: radar produced zero candidates.'
+            exit 1
+          fi
+
+      - name: Upload radar output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: travel-hotspot-v0-2-output
+          path: |
+            data/summaries/**
+            docs/**
+            /tmp/travel-hotspot-v0-2.log
+          if-no-files-found: warn
+          retention-days: 7
