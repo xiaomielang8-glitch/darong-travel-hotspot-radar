@@ -1,0 +1,43 @@
+name: Travel Hotspot V0.3 Source Probe
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/probe_cn_travel_sources.py'
+      - '.github/workflows/travel-hotspot-v0-3-source-probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.26'
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Validate probe syntax
+        run: uv run python -m py_compile scripts/probe_cn_travel_sources.py
+
+      - name: Probe Chinese travel sources
+        run: uv run python scripts/probe_cn_travel_sources.py
+
+      - name: Upload probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: travel-hotspot-v0-3-source-probe
+          path: data/probes/**
+          if-no-files-found: warn
+          retention-days: 7
