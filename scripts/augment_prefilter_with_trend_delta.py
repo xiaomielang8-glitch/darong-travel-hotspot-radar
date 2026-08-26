@@ -1,34 +1,23 @@
 """Augment the strict-24h travel prefilter with proven platform trend deltas.
 
-No LLM is used. The input is produced by the rolling V0.5 hot-board snapshot job and
-stored in the shared Actions cache. Only deltas with a <=6h comparison proof and a
-fresh snapshot are allowed into the pre-candidate pool.
+No LLM is used. V0.4 restores the rolling V0.5 Actions cache and derives the latest
+new-entry/rank-surge deltas from the cached snapshot history. Only a fresh <=6h
+comparison proof can enter the pre-candidate pool.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
+from build_platform_trend_snapshot import build_deltas, parse_dt
 from build_travel_candidate_prefilter import Candidate, merge_similar, title_score
 
-LATEST_DELTA_PATH = Path("data/platform-trend-state/latest-delta.json")
+HISTORY_PATH = Path("data/platform-trend-state/history.json")
 MAX_DELTA_AGE_HOURS = 6
 MAX_POOL = 60
 ALLOWED_PROOFS = {"new_entry", "rank_surge", "rank_surge_24h"}
-
-
-def parse_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
 
 
 def latest_prefilter() -> Path:
@@ -36,6 +25,39 @@ def latest_prefilter() -> Path:
     if not files:
         raise SystemExit("No strict-24h prefilter JSON found")
     return files[-1]
+
+
+def derive_latest_delta_payload() -> tuple[dict | None, str]:
+    if not HISTORY_PATH.exists():
+        return None, "no V0.5 rolling history cache"
+    try:
+        history = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return None, f"invalid trend history: {type(exc).__name__}"
+    if history.get("strict_window_hours") != 24:
+        return None, "trend history lost strict 24h rule"
+    snapshots = list(history.get("snapshots") or [])
+    if len(snapshots) < 2:
+        return None, "trend history has fewer than two snapshots"
+
+    current_snapshot = snapshots[-1]
+    previous = snapshots[-2]
+    current_at = parse_dt(current_snapshot.get("captured_at"))
+    previous_at = parse_dt(previous.get("captured_at"))
+    if current_at is None or previous_at is None or current_at <= previous_at:
+        return None, "trend history timestamps invalid"
+    gap = (current_at - previous_at).total_seconds() / 3600
+    if gap > MAX_DELTA_AGE_HOURS:
+        return None, f"trend comparison gap too large: {gap:.2f}h"
+
+    current = current_snapshot.get("sources") or {}
+    deltas = build_deltas(current, snapshots[:-1], previous, gap, current_at)
+    return {
+        "generated_at": current_at.isoformat(),
+        "strict_window_hours": 24,
+        "previous_gap_hours": round(gap, 2),
+        "deltas": [asdict(item) for item in deltas],
+    }, ""
 
 
 def valid_delta_payload(data: dict, now: datetime) -> tuple[bool, str]:
@@ -59,9 +81,8 @@ def convert_delta(item: dict, generated_at: str) -> Candidate | None:
     source_name = str(item.get("source") or "").strip()
     if not title or proof not in ALLOWED_PROOFS or not source_name:
         return None
-    freshness = item.get("freshness_hours")
     try:
-        freshness_hours = float(freshness)
+        freshness_hours = float(item.get("freshness_hours"))
     except (TypeError, ValueError):
         return None
     if freshness_hours < 0 or freshness_hours > MAX_DELTA_AGE_HOURS:
@@ -110,19 +131,19 @@ def main() -> None:
         raise SystemExit("Input prefilter lost strict 24h gate")
 
     stats = dict(pool.get("stats") or {})
-    stats["trend_delta_handoff_found"] = LATEST_DELTA_PATH.exists()
+    stats["trend_delta_handoff_found"] = HISTORY_PATH.exists()
     stats["trend_delta_added"] = 0
     stats["trend_delta_diagnostic"] = ""
 
-    if not LATEST_DELTA_PATH.exists():
-        stats["trend_delta_diagnostic"] = "no cached trend delta handoff; continue without it"
+    data, diagnostic = derive_latest_delta_payload()
+    if data is None:
+        stats["trend_delta_diagnostic"] = diagnostic
         pool["stats"] = stats
         pool_path.write_text(json.dumps(pool, ensure_ascii=False, indent=2), encoding="utf-8")
-        print("Trend delta augmentation skipped: no handoff file")
+        print(f"Trend delta augmentation skipped: {diagnostic}")
         return
 
     now = datetime.now(timezone.utc)
-    data = json.loads(LATEST_DELTA_PATH.read_text(encoding="utf-8"))
     valid, diagnostic = valid_delta_payload(data, now)
     if not valid:
         stats["trend_delta_diagnostic"] = diagnostic
