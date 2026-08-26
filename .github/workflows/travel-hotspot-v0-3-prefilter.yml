@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - 'scripts/build_travel_candidate_prefilter.py'
+      - 'scripts/feedparser.py'
       - '.github/workflows/travel-hotspot-v0-3-prefilter.yml'
 
 jobs:
@@ -28,7 +29,9 @@ jobs:
         run: uv sync
 
       - name: Validate prefilter syntax
-        run: uv run python -m py_compile scripts/build_travel_candidate_prefilter.py
+        run: |
+          uv run python -m py_compile scripts/build_travel_candidate_prefilter.py
+          uv run python -m py_compile scripts/feedparser.py
 
       - name: Build strict-24h pre-candidate pool
         run: uv run python scripts/build_travel_candidate_prefilter.py
