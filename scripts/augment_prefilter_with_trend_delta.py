@@ -2,7 +2,7 @@
 
 No LLM is used. V0.4 restores the rolling V0.5 Actions cache and derives the latest
 new-entry/rank-surge deltas from the cached snapshot history. Only a fresh <=6h
-comparison proof can enter the pre-candidate pool.
+comparison proof with clear traveller/business value can enter the pre-candidate pool.
 """
 from __future__ import annotations
 
@@ -12,12 +12,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from build_platform_trend_snapshot import build_deltas, parse_dt
-from build_travel_candidate_prefilter import Candidate, merge_similar, title_score
+from build_travel_candidate_prefilter import Candidate, merge_similar, normalize_title, title_score
 
 HISTORY_PATH = Path("data/platform-trend-state/history.json")
 MAX_DELTA_AGE_HOURS = 6
 MAX_POOL = 60
 ALLOWED_PROOFS = {"new_entry", "rank_surge", "rank_surge_24h"}
+
+SOURCE_LABELS = {
+    "baidu_realtime": "百度实时热搜",
+    "weibo_realtime": "微博实时热搜",
+    "toutiao_hot": "今日头条热榜",
+}
+
+# “游客/文旅/旅游”本身只是弱语义，不能把泛社会趣闻直接送进旅行热点池。
+# 热榜差分还必须同时包含游客决策、旅行场景、目的地设施或强事件信号。
+BUSINESS_RELEVANCE_TERMS = (
+    "景区", "景点", "打卡点", "门票", "预约", "限流", "闭园", "开园", "恢复开放", "暂停开放",
+    "民宿", "酒店", "自驾", "夜游", "亲子游", "避暑", "海边", "海岛", "古镇", "博物馆",
+    "乐园", "度假区", "漂流", "露营", "徒步", "研学", "索道", "游船", "演唱会", "音乐节",
+    "马拉松", "赛事", "机场", "航班", "高铁", "列车", "火车", "签证", "免签", "停航", "停运",
+    "被困", "滞留", "受伤", "死亡", "溺亡", "事故", "宰客", "投诉", "退改", "退票", "改签",
+    "涨价", "降价", "免费", "爆火", "走红", "出圈", "爆满", "售罄", "排队", "拥堵", "预订",
+    "搜索量", "客流", "首开", "首航", "首列", "新开",
+)
 
 
 def latest_prefilter() -> Path:
@@ -75,11 +93,17 @@ def valid_delta_payload(data: dict, now: datetime) -> tuple[bool, str]:
     return True, ""
 
 
+def business_relevant(title: str) -> bool:
+    return any(term in title for term in BUSINESS_RELEVANCE_TERMS)
+
+
 def convert_delta(item: dict, generated_at: str) -> Candidate | None:
     title = str(item.get("title") or "").strip()
     proof = str(item.get("proof") or "")
-    source_name = str(item.get("source") or "").strip()
-    if not title or proof not in ALLOWED_PROOFS or not source_name:
+    source_key = str(item.get("source") or "").strip()
+    if not title or proof not in ALLOWED_PROOFS or not source_key:
+        return None
+    if not business_relevant(title):
         return None
     try:
         freshness_hours = float(item.get("freshness_hours"))
@@ -109,11 +133,11 @@ def convert_delta(item: dict, generated_at: str) -> Candidate | None:
 
     return Candidate(
         source="trend_verified",
-        source_name=source_name,
+        source_name=SOURCE_LABELS.get(source_key, source_key),
         title=title,
         url=str(item.get("url") or ""),
         published_at=str(item.get("captured_at") or generated_at),
-        category="platform-trend-delta",
+        category="平台热榜差分",
         pre_score=max(5.0, base_score),
         reasons=reasons,
         evidence_source="platform_trend_delta",
@@ -122,6 +146,32 @@ def convert_delta(item: dict, generated_at: str) -> Candidate | None:
         trend_rank=current_rank,
         trend_hot=str(item.get("hot") or "") or None,
     )
+
+
+def enrich_exact_existing(existing: list[Candidate], converted: list[Candidate]) -> tuple[list[Candidate], list[Candidate], int]:
+    """Attach trend proof to an already collected exact topic instead of losing it in dedup."""
+    by_title = {normalize_title(item.title): item for item in existing}
+    new_items: list[Candidate] = []
+    enriched = 0
+    for delta in converted:
+        match = by_title.get(normalize_title(delta.title))
+        if match is None:
+            new_items.append(delta)
+            continue
+        enriched += 1
+        for reason in delta.reasons:
+            if reason not in match.reasons:
+                match.reasons.append(reason)
+        if delta.trend_rank is not None:
+            match.trend_rank = delta.trend_rank
+        if delta.trend_hot:
+            match.trend_hot = delta.trend_hot
+        # Keep independent news evidence when already present; otherwise use the trend proof.
+        if not match.evidence_source:
+            match.evidence_source = delta.evidence_source
+            match.evidence_url = delta.evidence_url
+            match.evidence_published_at = delta.evidence_published_at
+    return existing, new_items, enriched
 
 
 def main() -> None:
@@ -152,19 +202,25 @@ def main() -> None:
         print(f"Trend delta augmentation skipped: {diagnostic}")
         return
 
+    raw_deltas = list(data.get("deltas", []))
     converted = [
         candidate
-        for item in data.get("deltas", [])
+        for item in raw_deltas
         if (candidate := convert_delta(item, str(data.get("generated_at") or ""))) is not None
     ]
-    existing = [Candidate(**item) for item in pool.get("candidates", [])]
-    merged = merge_similar([*existing, *converted])[:MAX_POOL]
+    rejected = [item for item in raw_deltas if not business_relevant(str(item.get("title") or ""))]
 
-    stats["trend_delta_input"] = len(data.get("deltas", []))
+    existing = [Candidate(**item) for item in pool.get("candidates", [])]
+    existing, new_delta_items, enriched_count = enrich_exact_existing(existing, converted)
+    merged = merge_similar([*existing, *new_delta_items])[:MAX_POOL]
+
+    stats["trend_delta_input"] = len(raw_deltas)
     stats["trend_delta_valid"] = len(converted)
+    stats["trend_delta_rejected_weak_relevance"] = len(rejected)
+    stats["trend_delta_exact_existing_enriched"] = enriched_count
     stats["trend_delta_added"] = max(0, len(merged) - len(existing))
     stats["trend_delta_generated_at"] = data.get("generated_at")
-    stats["raw_before_merge_with_trend_delta"] = len(existing) + len(converted)
+    stats["raw_before_merge_with_trend_delta"] = len(existing) + len(new_delta_items)
     stats["merged_pool_with_trend_delta"] = len(merged)
 
     pool["stats"] = stats
@@ -176,14 +232,16 @@ def main() -> None:
     lines = [
         "# V0.6 平台热榜差分24小时增强",
         "",
-        "本层零LLM。只有V0.5最近快照证明的新上榜/明显升温，才可进入前置池；最终是否进入12—18条仍由ChatGPT判断。",
+        "本层零LLM。只有V0.5最近快照证明的新上榜/明显升温，且具备明确游客决策/旅行场景价值，才可进入前置池；最终是否进入12—18条仍由ChatGPT判断。",
         "",
-        f"- 差分输入：{len(data.get('deltas', []))}",
-        f"- 通过严格校验：{len(converted)}",
+        f"- 差分输入：{len(raw_deltas)}",
+        f"- 旅行业务相关校验通过：{len(converted)}",
+        f"- 弱旅行语义淘汰：{len(rejected)}",
+        f"- 已存在主题补充热榜证明：{enriched_count}",
         f"- 合并后净新增：{stats['trend_delta_added']}",
         f"- 差分快照时间：{data.get('generated_at')}",
         "",
-        "## 本轮差分",
+        "## 通过的差分",
         "",
     ]
     if not converted:
@@ -193,11 +251,18 @@ def main() -> None:
             f"- {item.title}｜{item.source_name}｜当前#{item.trend_rank or '-'}｜"
             f"{'; '.join(item.reasons[:3])}"
         )
+    lines.extend(["", "## 因只有弱旅行语义而淘汰", ""])
+    if not rejected:
+        lines.append("- 无")
+    for item in rejected:
+        lines.append(f"- {item.get('title')}｜{item.get('source')}｜{item.get('proof')}")
     report.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print("Trend delta strict-24h augmentation completed")
-    print(f"- trend_delta_input: {len(data.get('deltas', []))}")
+    print(f"- trend_delta_input: {len(raw_deltas)}")
     print(f"- trend_delta_valid: {len(converted)}")
+    print(f"- trend_delta_rejected_weak_relevance: {len(rejected)}")
+    print(f"- trend_delta_exact_existing_enriched: {enriched_count}")
     print(f"- trend_delta_added: {stats['trend_delta_added']}")
     print(f"Updated: {pool_path}")
     print(f"Report: {report}")
