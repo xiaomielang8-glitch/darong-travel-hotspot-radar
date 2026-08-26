@@ -43,6 +43,30 @@ MAX_PROOF_GAP_HOURS = 6
 RANK_SURGE_STEP = 8
 RANK_SURGE_24H = 12
 
+# Realtime boards are much noisier than travel news. Generic words such as “暴雨”,
+# “火车” or “机场” alone are not enough. This layer keeps only topics that plausibly
+# change a traveller's destination choice, itinerary, access, demand or safety.
+DIRECT_TRAVEL_TERMS = (
+    "旅游", "旅行", "出游", "游客", "旅客", "景区", "景点", "门票", "民宿", "酒店",
+    "演唱会", "音乐节", "博物馆", "古镇", "乐园", "海岛", "漂流", "露营", "徒步",
+    "研学", "签证", "免签", "自驾", "夜游", "亲子游", "度假区", "索道", "游船",
+    "迪士尼", "环球影城", "环球度假区",
+)
+TRANSPORT_TERMS = ("机场", "航班", "高铁", "列车", "火车", "铁路", "客运", "轮渡", "港口")
+TRANSPORT_CHANGE_TERMS = (
+    "停航", "停运", "取消", "延误", "恢复", "调整", "新开", "首航", "首开", "售罄",
+    "退票", "改签", "限流", "关闭", "暂停",
+)
+WEATHER_TERMS = ("台风", "暴雨", "山洪", "高温", "暴雪", "雷暴")
+WEATHER_TRAVEL_CONTEXT = (
+    "景区", "景点", "游客", "旅游", "旅行", "航班", "机场", "高铁", "列车", "停航",
+    "停运", "闭园", "关闭", "海岛", "游船", "轮渡",
+)
+GENERIC_NOISE = (
+    "防护攻略", "如何应对", "请收好", "安全提示", "气象站", "次生灾害", "铁路职工",
+    "列车员", "乘警", "班主任", "科普", "教程",
+)
+
 
 @dataclass
 class DeltaSignal:
@@ -60,6 +84,19 @@ class DeltaSignal:
 
 def normalize(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", text or "").lower()
+
+
+def strict_travel_match(title: str) -> bool:
+    title = title or ""
+    if any(term in title for term in GENERIC_NOISE):
+        return False
+    if any(term in title for term in DIRECT_TRAVEL_TERMS):
+        return True
+    if any(term in title for term in TRANSPORT_TERMS) and any(term in title for term in TRANSPORT_CHANGE_TERMS):
+        return True
+    if any(term in title for term in WEATHER_TERMS) and any(term in title for term in WEATHER_TRAVEL_CONTEXT):
+        return True
+    return False
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -92,12 +129,17 @@ def compact_signal(signal: Signal) -> dict:
         "url": signal.url,
         "rank": signal.rank,
         "hot": signal.hot,
-        "travel_match": bool(signal.travel_match),
+        "travel_match": strict_travel_match(signal.title),
     }
 
 
 def travel_rows(result: ProbeResult) -> list[dict]:
-    return [compact_signal(signal) for signal in result.signals if signal.travel_match]
+    rows: list[dict] = []
+    for signal in result.signals:
+        compact = compact_signal(signal)
+        if compact["travel_match"]:
+            rows.append(compact)
+    return rows
 
 
 def latest_valid_snapshot(snapshots: list[dict], now: datetime) -> tuple[dict | None, float | None]:
@@ -167,24 +209,22 @@ def build_deltas(
                 if older_ranks and max(older_ranks) - current_rank >= RANK_SURGE_24H:
                     proof = "rank_surge_24h"
 
-            if not proof:
-                continue
-            deltas.append(
-                DeltaSignal(
-                    source=source,
-                    title=title,
-                    url=str(row.get("url") or ""),
-                    current_rank=current_rank,
-                    previous_rank=previous_rank,
-                    hot=str(row.get("hot") or ""),
-                    proof=proof,
-                    captured_at=now.isoformat(),
-                    previous_captured_at=previous_at,
-                    freshness_hours=round(previous_gap, 2),
+            if proof:
+                deltas.append(
+                    DeltaSignal(
+                        source=source,
+                        title=title,
+                        url=str(row.get("url") or ""),
+                        current_rank=current_rank,
+                        previous_rank=previous_rank,
+                        hot=str(row.get("hot") or ""),
+                        proof=proof,
+                        captured_at=now.isoformat(),
+                        previous_captured_at=previous_at,
+                        freshness_hours=round(previous_gap, 2),
+                    )
                 )
-            )
 
-    # Strongest ranks first; unknown rank last.
     deltas.sort(key=lambda item: (item.current_rank is None, item.current_rank or 999, item.source, item.title))
     return deltas
 
@@ -192,6 +232,7 @@ def build_deltas(
 def render_report(
     now: datetime,
     results: list[ProbeResult],
+    current_sources: dict[str, list[dict]],
     previous: dict | None,
     previous_gap: float | None,
     deltas: list[DeltaSignal],
@@ -214,7 +255,7 @@ def render_report(
     ]
     for result in results:
         lines.append(
-            f"- {result.name}：{result.status}｜总榜{len(result.signals)}条｜旅行相关{sum(s.travel_match for s in result.signals)}条"
+            f"- {result.name}：{result.status}｜总榜{len(result.signals)}条｜严格旅行相关{len(current_sources.get(result.key, []))}条"
         )
         if result.error:
             lines.append(f"  - 诊断：{result.error}")
@@ -289,7 +330,10 @@ async def main() -> None:
         "deltas": [asdict(item) for item in deltas],
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    md_path.write_text(render_report(now, results, previous, previous_gap, deltas, len(snapshots)), encoding="utf-8")
+    md_path.write_text(
+        render_report(now, results, current_sources, previous, previous_gap, deltas, len(snapshots)),
+        encoding="utf-8",
+    )
 
     print("Platform trend snapshot completed")
     print(f"- baseline_seeded: {previous is None}")
@@ -297,7 +341,7 @@ async def main() -> None:
     for result in results:
         print(
             f"- {result.name}: {result.status}, total={len(result.signals)}, "
-            f"travel={sum(s.travel_match for s in result.signals)}"
+            f"strict_travel={len(current_sources.get(result.key, []))}"
         )
     print(f"- delta_count: {len(deltas)}")
     print(f"- history_snapshots: {len(snapshots)}")
