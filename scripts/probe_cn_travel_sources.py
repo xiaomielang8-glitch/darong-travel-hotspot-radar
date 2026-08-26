@@ -1,9 +1,8 @@
-"""Probe public Chinese travel/community pages before wiring them into Horizon.
+"""Probe retained Chinese travel/community sources with a strict 24-hour rule.
 
-This probe intentionally collects only lightweight public metadata (title, URL,
-visible date/rank text). It does not log in, bypass anti-bot controls, or copy
-article bodies. The goal is to verify which sources are reachable from GitHub
-Actions and which ones actually expose fresh or useful trend signals.
+Only public lightweight metadata is read. No login, anti-bot bypass, or article-body
+scraping. Content older than 24 hours can never become a formal candidate.
+Trend-only pages without reliable publish time are snapshot signals only.
 """
 
 from __future__ import annotations
@@ -14,13 +13,12 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
-
+CN_TZ = timezone(timedelta(hours=8))
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -28,20 +26,12 @@ USER_AGENT = (
 )
 
 
-@dataclass(frozen=True)
-class SourceSpec:
-    key: str
-    name: str
-    url: str
-    signal_type: str
-    note: str
-
-
 @dataclass
 class Signal:
     title: str
     url: str
     published_at: str | None = None
+    direct_24h_eligible: bool = False
     signal: str = ""
 
 
@@ -50,316 +40,157 @@ class ProbeResult:
     key: str
     name: str
     url: str
-    signal_type: str
-    note: str
     status: str
+    rule: str
     http_status: int | None = None
     final_url: str | None = None
-    bytes: int = 0
-    fresh_72h_count: int = 0
+    fresh_24h_count: int = 0
     signals: list[Signal] = field(default_factory=list)
     error: str | None = None
 
 
-SOURCES = [
-    SourceSpec(
-        key="mafengwo_fengshou",
-        name="马蜂窝·蜂首",
-        url="https://www.mafengwo.cn/club/",
-        signal_type="fresh_content",
-        note="优先验证：每天精选游记，页面直接暴露发布日期，适合作为游客玩法/目的地灵感源。",
-    ),
-    SourceSpec(
-        key="mafengwo_home",
-        name="马蜂窝·首页社区流",
-        url="https://www.mafengwo.cn/",
-        signal_type="community_trend",
-        note="观察社区推荐标题、阅读/互动信号；无可靠发布时间时只作为趋势信号，不直接当24小时新闻。",
-    ),
-    SourceSpec(
-        key="tongcheng_travels",
-        name="同程·攻略游记",
-        url="https://go.ly.com/travels/",
-        signal_type="fresh_content_or_trend",
-        note="验证“最新发布”是否在服务端HTML可见；若只有旧精选，则降级为趋势参考。",
-    ),
-    SourceSpec(
-        key="ctrip_guide",
-        name="携程·攻略社区首页",
-        url="https://you.ctrip.com/",
-        signal_type="trend_only",
-        note="携程旧游记频道已停止运维，当前只验证热门目的地/攻略等公开趋势信号，不把静态攻略冒充24小时热点。",
-    ),
-    SourceSpec(
-        key="qunar_touch",
-        name="去哪儿·攻略移动首页",
-        url="https://touch.travel.qunar.com/",
-        signal_type="trend_only",
-        note="验证热门目的地、榜单、玩法入口是否可稳定读取；无发布时间则仅作为趋势信号。",
-    ),
-]
-
-
-def _clean_text(value: str) -> str:
+def clean(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def _same_host_or_subdomain(base_url: str, target_url: str) -> bool:
-    base = (urlsplit(base_url).hostname or "").lower()
-    target = (urlsplit(target_url).hostname or "").lower()
-    if not target:
-        return True
-    root = ".".join(base.split(".")[-2:])
-    return target == root or target.endswith("." + root)
+def within_24h(dt: datetime | None, now: datetime) -> bool:
+    if dt is None:
+        return False
+    return now - timedelta(hours=24) <= dt <= now + timedelta(minutes=10)
 
 
-def _dedupe(signals: Iterable[Signal], limit: int = 30) -> list[Signal]:
-    seen: set[tuple[str, str]] = set()
-    result: list[Signal] = []
-    for signal in signals:
-        key = (_clean_text(signal.title).lower(), signal.url.rstrip("/"))
-        if not key[0] or key in seen:
-            continue
-        seen.add(key)
-        result.append(signal)
-        if len(result) >= limit:
-            break
-    return result
-
-
-def _parse_cn_date(text: str) -> datetime | None:
+def parse_cn_date(text: str) -> datetime | None:
     match = re.search(r"(20\d{2})年(\d{1,2})月(\d{1,2})日", text)
     if not match:
         return None
     try:
         return datetime(
-            int(match.group(1)),
-            int(match.group(2)),
-            int(match.group(3)),
-            tzinfo=timezone(timedelta(hours=8)),
-        )
+            int(match.group(1)), int(match.group(2)), int(match.group(3)), tzinfo=CN_TZ
+        ).astimezone(timezone.utc)
     except ValueError:
         return None
 
 
-def _parse_isoish_date(text: str) -> datetime | None:
-    match = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", text)
-    if not match:
-        return None
-    try:
-        return datetime(
-            int(match.group(1)),
-            int(match.group(2)),
-            int(match.group(3)),
-            tzinfo=timezone(timedelta(hours=8)),
-        )
-    except ValueError:
-        return None
-
-
-def _is_fresh(dt: datetime | None, now: datetime, hours: int = 72) -> bool:
-    if dt is None:
-        return False
-    return now - timedelta(hours=hours) <= dt <= now + timedelta(hours=24)
-
-
-def _generic_anchor_signals(spec: SourceSpec, soup: BeautifulSoup) -> list[Signal]:
-    signals: list[Signal] = []
-    for anchor in soup.find_all("a", href=True):
-        title = _clean_text(anchor.get_text(" ", strip=True))
-        if len(title) < 5 or len(title) > 120:
+def dedupe(items: list[Signal], limit: int = 30) -> list[Signal]:
+    seen: set[tuple[str, str]] = set()
+    out: list[Signal] = []
+    for item in items:
+        key = (clean(item.title).lower(), item.url.rstrip("/"))
+        if not key[0] or key in seen:
             continue
-        href = urljoin(spec.url, anchor.get("href", ""))
-        if not href.startswith(("http://", "https://")):
-            continue
-        if not _same_host_or_subdomain(spec.url, href):
-            continue
-        if any(x in title for x in ("登录", "注册", "首页", "更多", "客服", "帮助", "意见反馈")):
-            continue
-        signals.append(Signal(title=title, url=href))
-    return _dedupe(signals, 25)
+        seen.add(key)
+        out.append(item)
+        if len(out) >= limit:
+            break
+    return out
 
 
-def _parse_mafengwo_fengshou(spec: SourceSpec, soup: BeautifulSoup) -> list[Signal]:
-    signals: list[Signal] = []
-    pattern = re.compile(r"(20\d{2}年\d{1,2}月\d{1,2}日)\s*蜂首游记\s*[《『](.+?)[》』]")
-    for anchor in soup.find_all("a", href=True):
-        text = _clean_text(anchor.get_text(" ", strip=True))
-        match = pattern.search(text)
-        if not match:
-            continue
-        dt = _parse_cn_date(match.group(1))
-        title = _clean_text(match.group(2))
-        signals.append(
-            Signal(
-                title=title,
-                url=urljoin(spec.url, anchor["href"]),
-                published_at=dt.isoformat() if dt else None,
-                signal="蜂首精选",
-            )
-        )
-    return _dedupe(signals, 20)
-
-
-def _parse_tongcheng(spec: SourceSpec, soup: BeautifulSoup) -> list[Signal]:
-    # The current desktop page exposes some featured entries as e.g.
-    # "13 2026 MAY" next to the linked title. Keep the visible date when found.
-    month_map = {
-        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-        "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-    }
-    full_text = _clean_text(soup.get_text(" ", strip=True))
-    dated_titles: list[Signal] = []
-    # First keep article-like links. Then infer a nearby date from parent/grandparent text.
-    for anchor in soup.find_all("a", href=True):
-        title = _clean_text(anchor.get_text(" ", strip=True))
-        if len(title) < 8 or len(title) > 120:
-            continue
-        href = urljoin(spec.url, anchor["href"])
-        if "/travels/" not in href:
-            continue
-        context = ""
-        node = anchor
-        for _ in range(3):
-            node = node.parent
-            if node is None:
-                break
-            context = _clean_text(node.get_text(" ", strip=True))
-            if re.search(r"\b\d{1,2}\s+20\d{2}\s+[A-Z]{3}\b", context):
-                break
-        published_at = None
-        match = re.search(r"\b(\d{1,2})\s+(20\d{2})\s+([A-Z]{3})\b", context)
-        if match and match.group(3) in month_map:
-            try:
-                dt = datetime(
-                    int(match.group(2)), month_map[match.group(3)], int(match.group(1)),
-                    tzinfo=timezone(timedelta(hours=8)),
-                )
-                published_at = dt.isoformat()
-            except ValueError:
-                pass
-        dated_titles.append(
-            Signal(title=title, url=href, published_at=published_at, signal="同程游记")
-        )
-    if dated_titles:
-        return _dedupe(dated_titles, 25)
-    return _generic_anchor_signals(spec, soup)
-
-
-def _parse_ctrip(spec: SourceSpec, soup: BeautifulSoup) -> list[Signal]:
-    signals: list[Signal] = []
-    for anchor in soup.find_all("a", href=True):
-        title = _clean_text(anchor.get_text(" ", strip=True))
-        if len(title) < 4 or len(title) > 80:
-            continue
-        href = urljoin(spec.url, anchor["href"])
-        if not _same_host_or_subdomain(spec.url, href):
-            continue
-        if not any(token in href for token in ("/place/", "/sight/", "/travels/")):
-            continue
-        signals.append(Signal(title=title, url=href, signal="携程公开攻略/目的地信号"))
-    return _dedupe(signals, 25)
-
-
-def _parse_qunar(spec: SourceSpec, soup: BeautifulSoup) -> list[Signal]:
-    signals: list[Signal] = []
-    for anchor in soup.find_all("a", href=True):
-        title = _clean_text(anchor.get_text(" ", strip=True))
-        if len(title) < 4 or len(title) > 100:
-            continue
-        href = urljoin(spec.url, anchor["href"])
-        if not _same_host_or_subdomain(spec.url, href):
-            continue
-        if not any(token in href for token in ("/youji", "/book", "/p-", "/poi")):
-            continue
-        signals.append(Signal(title=title, url=href, signal="去哪儿公开攻略/榜单信号"))
-    return _dedupe(signals, 25)
-
-
-def _parse(spec: SourceSpec, html: str) -> list[Signal]:
-    soup = BeautifulSoup(html, "html.parser")
-    if spec.key == "mafengwo_fengshou":
-        return _parse_mafengwo_fengshou(spec, soup)
-    if spec.key == "tongcheng_travels":
-        return _parse_tongcheng(spec, soup)
-    if spec.key == "ctrip_guide":
-        return _parse_ctrip(spec, soup)
-    if spec.key == "qunar_touch":
-        return _parse_qunar(spec, soup)
-    return _generic_anchor_signals(spec, soup)
-
-
-async def _probe_one(client: httpx.AsyncClient, spec: SourceSpec, now: datetime) -> ProbeResult:
+async def probe_mafengwo(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
+    url = "https://www.mafengwo.cn/club/"
     result = ProbeResult(
-        key=spec.key,
-        name=spec.name,
-        url=spec.url,
-        signal_type=spec.signal_type,
-        note=spec.note,
+        key="mafengwo_fengshou",
+        name="马蜂窝·蜂首",
+        url=url,
         status="failure",
+        rule="有明确发布日期；只有运行时刻往前24小时内发布的内容才可进入玩法候选预筛。",
     )
     try:
-        response = await client.get(spec.url)
-        result.http_status = response.status_code
-        result.final_url = str(response.url)
-        result.bytes = len(response.content)
-        response.raise_for_status()
-        signals = _parse(spec, response.text)
-        result.signals = signals
-        fresh = 0
-        for signal in signals:
-            dt = None
-            if signal.published_at:
-                try:
-                    dt = datetime.fromisoformat(signal.published_at)
-                except ValueError:
-                    dt = None
-            if _is_fresh(dt, now):
-                fresh += 1
-        result.fresh_72h_count = fresh
-        result.status = "success" if signals else "empty"
-    except Exception as exc:  # probe must report rather than crash all sources
+        resp = await client.get(url)
+        result.http_status = resp.status_code
+        result.final_url = str(resp.url)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        pattern = re.compile(r"(20\d{2}年\d{1,2}月\d{1,2}日)\s*蜂首游记\s*[《『](.+?)[》』]")
+        items: list[Signal] = []
+        for a in soup.find_all("a", href=True):
+            text = clean(a.get_text(" ", strip=True))
+            match = pattern.search(text)
+            if not match:
+                continue
+            dt = parse_cn_date(match.group(1))
+            eligible = within_24h(dt, now)
+            items.append(
+                Signal(
+                    title=clean(match.group(2)),
+                    url=urljoin(url, a["href"]),
+                    published_at=dt.isoformat() if dt else None,
+                    direct_24h_eligible=eligible,
+                    signal="蜂首精选",
+                )
+            )
+        result.signals = dedupe(items, 20)
+        result.fresh_24h_count = sum(s.direct_24h_eligible for s in result.signals)
+        result.status = "success" if result.signals else "empty"
+    except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"
     return result
 
 
-def _render_markdown(results: list[ProbeResult], generated_at: datetime) -> str:
+async def probe_ctrip(client: httpx.AsyncClient, now: datetime) -> ProbeResult:
+    url = "https://you.ctrip.com/"
+    result = ProbeResult(
+        key="ctrip_guide",
+        name="携程·攻略社区首页",
+        url=url,
+        status="failure",
+        rule="页面缺少可靠发布时间，只保存当前热门目的地/攻略快照；不能直接进入候选，必须有24小时内新增/升温或其他新鲜证据。",
+    )
+    try:
+        resp = await client.get(url)
+        result.http_status = resp.status_code
+        result.final_url = str(resp.url)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        items: list[Signal] = []
+        for a in soup.find_all("a", href=True):
+            title = clean(a.get_text(" ", strip=True))
+            if len(title) < 4 or len(title) > 80:
+                continue
+            href = urljoin(url, a["href"])
+            if "ctrip.com" not in href:
+                continue
+            if not any(token in href for token in ("/place/", "/sight/", "/travels/")):
+                continue
+            items.append(
+                Signal(
+                    title=title,
+                    url=href,
+                    direct_24h_eligible=False,
+                    signal="携程趋势快照",
+                )
+            )
+        result.signals = dedupe(items, 25)
+        result.status = "success" if result.signals else "empty"
+    except Exception as exc:
+        result.error = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+def render(results: list[ProbeResult], now: datetime) -> str:
     lines = [
-        "# V0.3 中国旅行网站采集可行性探针",
+        "# V0.3 中国旅行网站24小时探针",
         "",
-        f"生成时间：{generated_at.astimezone(timezone(timedelta(hours=8))).isoformat(timespec='seconds')}",
+        f"生成时间：{now.astimezone(CN_TZ).isoformat(timespec='seconds')}",
         "",
-        "本报告只验证公开页面的可达性与轻量元数据（标题、链接、可见时间/趋势信号），不抓取正文。",
+        "硬规则：正式候选不得超过24小时。无可靠发布时间的趋势页只能保存快照，不可直接冒充新热点。",
         "",
-        "| 来源 | 状态 | HTTP | 解析信号 | 近72小时有明确日期 | 类型 |",
-        "|---|---:|---:|---:|---:|---|",
+        "| 来源 | 状态 | HTTP | 总信号 | 24h可直接预筛 |",
+        "|---|---:|---:|---:|---:|",
     ]
-    for result in results:
+    for r in results:
         lines.append(
-            f"| {result.name} | {result.status} | {result.http_status or '-'} | "
-            f"{len(result.signals)} | {result.fresh_72h_count} | {result.signal_type} |"
+            f"| {r.name} | {r.status} | {r.http_status or '-'} | {len(r.signals)} | {r.fresh_24h_count} |"
         )
-    for result in results:
-        lines.extend(["", f"## {result.name}", "", result.note])
-        if result.error:
-            lines.extend(["", f"错误：`{result.error}`"])
-            continue
-        if not result.signals:
-            lines.extend(["", "未解析到可用信号。"])
+    for r in results:
+        lines.extend(["", f"## {r.name}", "", r.rule])
+        if r.error:
+            lines.extend(["", f"错误：`{r.error}`"])
             continue
         lines.append("")
-        for signal in result.signals[:12]:
-            when = f"｜{signal.published_at}" if signal.published_at else ""
-            tag = f"｜{signal.signal}" if signal.signal else ""
-            lines.append(f"- [{signal.title}]({signal.url}){when}{tag}")
-    lines.extend([
-        "",
-        "## 判定规则",
-        "",
-        "- `fresh_content`：页面本身能给出可靠发布时间，可直接进入24/72小时候选预筛。",
-        "- `community_trend` / `trend_only`：没有可靠发布时间时，只保留为热度/榜单信号；后续必须依赖跨日排名变化或其他新鲜度证据，不能每天重复冒充新热点。",
-        "- 某来源若从 GitHub Actions 返回 403/验证码/空壳页面，本轮不接入正式采集，不做绕过。",
-    ])
+        for s in r.signals[:15]:
+            when = f"｜{s.published_at}" if s.published_at else ""
+            state = "｜24h可预筛" if s.direct_24h_eligible else "｜仅趋势快照"
+            lines.append(f"- [{s.title}]({s.url}){when}{state}")
     return "\n".join(lines) + "\n"
 
 
@@ -367,45 +198,34 @@ async def main() -> None:
     now = datetime.now(timezone.utc)
     headers = {
         "User-Agent": USER_AGENT,
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
-    async with httpx.AsyncClient(
-        headers=headers,
-        timeout=httpx.Timeout(25.0),
-        follow_redirects=True,
-    ) as client:
-        results = await asyncio.gather(*(_probe_one(client, spec, now) for spec in SOURCES))
+    async with httpx.AsyncClient(headers=headers, timeout=httpx.Timeout(25.0), follow_redirects=True) as client:
+        results = await asyncio.gather(probe_mafengwo(client, now), probe_ctrip(client, now))
 
     out_dir = Path("data/probes")
     out_dir.mkdir(parents=True, exist_ok=True)
-    stamp = now.astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+    stamp = now.astimezone(CN_TZ).strftime("%Y-%m-%d-%H%M")
     json_path = out_dir / f"cn-travel-sources-{stamp}.json"
     md_path = out_dir / f"cn-travel-sources-{stamp}.md"
     json_path.write_text(
         json.dumps(
-            {
-                "generated_at": now.isoformat(),
-                "results": [
-                    {**asdict(result), "signals": [asdict(s) for s in result.signals]}
-                    for result in results
-                ],
-            },
+            {"generated_at": now.isoformat(), "strict_window_hours": 24, "results": [asdict(r) for r in results]},
             ensure_ascii=False,
             indent=2,
         ),
         encoding="utf-8",
     )
-    md_path.write_text(_render_markdown(list(results), now), encoding="utf-8")
+    md_path.write_text(render(list(results), now), encoding="utf-8")
 
-    print("Chinese travel source probe completed")
-    for result in results:
+    print("Chinese travel source strict-24h probe completed")
+    for r in results:
         print(
-            f"- {result.name}: {result.status}, HTTP={result.http_status}, "
-            f"signals={len(result.signals)}, fresh72h={result.fresh_72h_count}"
+            f"- {r.name}: {r.status}, HTTP={r.http_status}, signals={len(r.signals)}, fresh24h={r.fresh_24h_count}"
         )
-        if result.error:
-            print(f"  error={result.error}")
+        if r.error:
+            print(f"  error={r.error}")
     print(f"JSON: {json_path}")
     print(f"Markdown: {md_path}")
 
