@@ -42,6 +42,8 @@ HIGH_EVENT_TERMS = (
 )
 
 TREND_TERMS = ("搜索量", "预订涨", "预订量", "环比", "同比", "暴增", "TOP10", "热搜", "爆火", "走红", "出圈")
+CLOSURE_TERMS = ("闭园", "关闭", "暂停营业", "暂停开放", "临时关闭", "临时关停")
+WEATHER_TERMS = ("台风", "防台", "暴雨", "降雨", "山洪", "风暴潮")
 
 PLACE_HINTS = (
     "浙江", "福建", "福州", "三亚", "海口", "涠洲岛", "广西", "青岛", "南京", "上海",
@@ -51,6 +53,7 @@ PLACE_HINTS = (
 )
 
 ENTITY_RE = re.compile(r"([\u4e00-\u9fffA-Za-z0-9“”·]{2,18}(?:景区|乐园|岛|寺|山|古镇|公园|机场|港|湾|城|雪山|盐湖|草原|度假区))")
+ACTOR_RE = re.compile(r"演员([\u4e00-\u9fff]{2,4}?)(?=当|回应|在|称|做|扮|饰|成为|$)")
 SOURCE_SUFFIX_RE = re.compile(r"\s+-\s+[^-]{1,50}$")
 
 
@@ -84,7 +87,7 @@ def jaccard(a: str, b: str) -> float:
 
 
 def event_family(title: str) -> str:
-    if any(x in title for x in ("台风", "防台", "暴雨", "降雨", "山洪", "风暴潮")) and any(
+    if any(x in title for x in WEATHER_TERMS) and any(
         x in title for x in ("闭园", "关闭", "停航", "停运", "滞留", "暂停", "撤离", "关停", "恢复开放", "被困")
     ):
         return "weather_disruption"
@@ -141,11 +144,29 @@ def rejection_reason(candidate: dict) -> str | None:
 def same_event(a: dict, b: dict) -> bool:
     ta, tb = a.get("title", ""), b.get("title", "")
     fa, fb = event_family(ta), event_family(tb)
+    ea, eb = entities(ta), entities(tb)
+    shared_entities = ea & eb
+
+    # Same place + closure + at least one explicit weather disruption is treated as one
+    # weather-closure topic even when the other syndicated headline only names the storm.
     if fa != fb:
+        families = {fa, fb}
+        if families == {"weather_disruption", "closure_or_opening"} and shared_entities:
+            both_closure = all(any(term in title for term in CLOSURE_TERMS) for title in (ta, tb))
+            has_weather = any(term in (ta + tb) for term in WEATHER_TERMS)
+            if both_closure and has_weather:
+                return True
         return False
 
-    ea, eb = entities(ta), entities(tb)
-    if ea & eb:
+    # Same actor + NPC + same trend family is a strong specific anchor. This catches
+    # syndicated headlines such as “演员陈明当NPC走红” vs “演员陈明回应景区NPC走红”
+    # without lowering the generic similarity threshold for unrelated tourist stories.
+    if "npc" in ta.lower() and "npc" in tb.lower():
+        aa, ab = ACTOR_RE.search(ta), ACTOR_RE.search(tb)
+        if aa and ab and aa.group(1) == ab.group(1):
+            return True
+
+    if shared_entities:
         return True
 
     jac = jaccard(ta, tb)
